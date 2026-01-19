@@ -1,4 +1,15 @@
 from __future__ import annotations
+from __future__ import annotations
+
+
+import os
+import sys
+
+# Databricks Apps run source under /app/python/source_code/...
+# Ensure the repo root is on sys.path so `import qldrevenue` works without packaging.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import json
 import uuid

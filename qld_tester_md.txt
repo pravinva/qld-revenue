@@ -1,0 +1,792 @@
+# Queensland Revenue Office - QA Testing Guide
+
+## Test Environment
+- **Workspace**: https://qro.cloud.databricks.com
+- **App URL**: /apps/qro-fraud-mgmt
+- **Test Users**: revenue.officer{1-5}@qro.qld.gov.au
+- **ServiceNow**: https://qld-revenue.service-now.com/test
+
+## Pre-Test Data Verification
+
+```sql
+-- Run these queries before testing
+SELECT 'Total Cases' as metric, COUNT(*) as value 
+FROM main.qro_fraud_detection.revenue_cases_silver
+UNION ALL
+SELECT 'Active Cases', COUNT(*) 
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+UNION ALL
+SELECT 'Payroll Tax', COUNT(*) 
+FROM main.qro_fraud_detection.revenue_cases_silver 
+WHERE case_type = 'Payroll Tax'
+UNION ALL
+SELECT 'Land Tax', COUNT(*) 
+FROM main.qro_fraud_detection.revenue_cases_silver 
+WHERE case_type = 'Land Tax';
+
+-- Expected Results:
+-- Total Cases: 6500+
+-- Active Cases: 4000+
+-- Payroll Tax: 3000+
+-- Land Tax: 2000+
+```
+
+---
+
+## TC-QRO-001: Create Payroll Tax Rule
+
+**Priority**: P0 (Critical)
+
+**Test**: Revenue officer creates filtering rule for mining sector payroll tax
+
+**Steps**:
+1. Login as `revenue.officer1@qro.qld.gov.au`
+2. Click "My Rules" → "Create New Rule"
+3. Enter:
+   - Name: "Mining Sector High Risk"
+   - Description: "Coal mining payroll tax with shortfall > $50K"
+   - Filters:
+     * Case Type: "Payroll Tax"
+     * Industry: 0600 (Coal Mining)
+     * Min Tax Shortfall: 50000
+     * Min Risk Score: 60
+4. Click "Save"
+
+**Expected**:
+- ✅ Success message
+- ✅ Rule appears in list
+- ✅ Last Used shows "Never"
+
+**Verify Database**:
+```sql
+SELECT rule_name, filter_conditions 
+FROM main.qro_fraud_detection.officer_case_rules
+WHERE officer_email = 'revenue.officer1@qro.qld.gov.au';
+```
+
+**Pass Criteria**: Rule saved with correct JSON filters
+
+---
+
+## TC-QRO-002: Apply Rule - Filter Accuracy
+
+**Test**: Verify rule returns only matching cases
+
+**Steps**:
+1. Select "Mining Sector High Risk" rule
+2. Click "Apply"
+3. Review case list
+
+**Expected Results**:
+- All cases show:
+  * Case Type = "Payroll Tax"
+  * Industry = "Coal Mining"
+  * Tax Shortfall ≥ $50,000
+  * Risk Score ≥ 60
+- Case count matches SQL query
+
+**Verify**:
+```sql
+SELECT case_id, taxpayer_name, industry_description, 
+       tax_shortfall, risk_score
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+WHERE case_type = 'Payroll Tax'
+  AND industry_code = '0600'
+  AND tax_shortfall >= 50000
+  AND risk_score >= 60;
+```
+
+**Test Cases**:
+| Case ID | Industry | Shortfall | Risk | Show? |
+|---------|----------|-----------|------|-------|
+| CASE-PT-FRAUD-MINING-001 | Coal Mining | $285K | 88 | ✅ Yes |
+| CASE-PT-00123 | Coal Mining | $48K | 72 | ❌ No (amount) |
+| CASE-PT-00456 | Hospitality | $65K | 75 | ❌ No (industry) |
+
+**Pass Criteria**: UI matches SQL exactly
+
+---
+
+## TC-QRO-003: Case Statistics
+
+**Test**: Verify aggregate statistics for Queensland data
+
+**Steps**:
+1. Apply "Mining Sector High Risk" rule
+2. Note statistics panel:
+   - Total Cases
+   - Total Revenue Exposure
+   - Avg Tax Shortfall
+   - Unique Taxpayers
+
+**Verify**:
+```sql
+SELECT 
+  COUNT(*) as total_cases,
+  SUM(total_exposure) as total_exposure,
+  AVG(tax_shortfall) as avg_shortfall,
+  COUNT(DISTINCT taxpayer_abn) as unique_taxpayers
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+WHERE case_type = 'Payroll Tax'
+  AND industry_code = '0600'
+  AND tax_shortfall >= 50000
+  AND risk_score >= 60;
+```
+
+**Pass Criteria**: 
+- Numbers match ±$0.01
+- Counts exact match
+
+---
+
+## TC-QRO-004: Mining Fraud Pattern Detection
+
+**Test**: Verify detection of interstate wage shifting fraud
+
+**Test Case**: Queensland Coal Mining Operations (CASE-PT-FRAUD-MINING-001)
+
+**Steps**:
+1. View case details
+2. Review key metrics
+
+**Expected Indicators**:
+- Total Wages: $48,500,000
+- Taxable Wages QLD: $13,200,000 (27%)
+- Employees QLD: 450 / 1250 total (36%)
+- **RED FLAG**: Only 27% wages in QLD but 36% employees
+- Location: Townsville (coal mining town)
+- Industry: Coal Mining (can't easily relocate)
+- Tax Shortfall: $285,000
+- Fraud Category: "Interstate Wage Shifting"
+
+**Business Context**:
+Mining operations are geographically fixed. 450 employees work in QLD mines, but company claims only $13.2M of $48.5M wages taxable in QLD. Likely routing QLD workers through NSW/VIC subsidiary to avoid QLD payroll tax.
+
+**Verify**:
+```sql
+SELECT 
+  case_id, taxpayer_name,
+  total_wages, taxable_wages,
+  (taxable_wages/total_wages*100) as pct_qld_wages,
+  employee_count_qld, employee_count_australia,
+  (employee_count_qld::FLOAT/employee_count_australia*100) as pct_qld_employees,
+  taxpayer_suburb, fraud_category, tax_shortfall
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE case_id = 'CASE-PT-FRAUD-MINING-001';
+```
+
+**Pass Criteria**: Fraud category correctly identified
+
+---
+
+## TC-QRO-005: Hospitality Cash Underreporting
+
+**Test**: Verify Gold Coast nightclub fraud detection
+
+**Test Case**: Surfers Paradise Nightclub (CASE-PT-FRAUD-HOSP-001)
+
+**Expected Indicators**:
+- Business: "Surfers Paradise Nightclub & Bar"
+- Location: 4217 (Surfers Paradise)
+- Industry: Food & Beverage Services (4500)
+- Total Wages: $2,850,000
+- Employees: 38 (suspiciously low)
+- **RED FLAG**: Major nightclub with only 38 staff
+- Expected: 80-100+ staff for venue of this size
+- Tax Below Threshold: Claims below $6.5M (suspicious)
+- Lodgement: 56 days late
+- Fraud Category: "Cash Business Underreporting"
+
+**Business Context**:
+Hospitality venues often underreport cash wages. $2.85M wages for 38 staff = $75K per employee (reasonable), BUT a busy Surfers Paradise nightclub should have 80+ staff. Likely paying many workers cash off-books.
+
+**Verify**:
+```sql
+SELECT case_id, taxpayer_name, industry_description,
+       total_wages, employee_count_qld, 
+       (total_wages/employee_count_qld) as wages_per_employee,
+       taxpayer_suburb, fraud_category
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE case_id = 'CASE-PT-FRAUD-HOSP-001';
+```
+
+---
+
+## TC-QRO-006: Construction Labor Hire Fraud
+
+**Test**: Contractor misclassification detection
+
+**Test Case**: Brisbane Metro Builders (CASE-PT-FRAUD-CONST-001)
+
+**Expected**:
+- Total Payments: $11,500,000
+- Classified as Employees: $2,300,000 (20%)
+- Classified as Contractors: $9,200,000 (80%)
+- **RED FLAG**: 80% contractor rate (industry norm: 20-30%)
+- Tax Avoided: ~$230,000
+- Fraud Category: "Excessive Exemption Claims"
+
+**Verify**:
+```sql
+SELECT case_id, 
+       (taxable_wages/total_wages*100) as pct_employees,
+       (total_wages - taxable_wages) as claimed_contractors,
+       tax_shortfall
+FROM main.qro_fraud_detection.revenue_cases_silver  
+WHERE case_id = 'CASE-PT-FRAUD-CONST-001';
+```
+
+---
+
+## TC-QRO-007: Luxury Property False Farm Claim
+
+**Test**: Noosa beachfront mansion claiming farm exemption
+
+**Test Case**: Smith Trust (CASE-LT-FRAUD-LUXURY-001)
+
+**Expected**:
+- Property: 15 Millionaire Drive, Noosa Heads
+- Land Value: $3,200,000
+- Total Value: $5,600,000
+- Exemption: "Primary Production" (farming)
+- **RED FLAG**: Noosa Heads is coastal resort, not farmland
+- Tax Avoided: ~$44,000
+- Fraud Category: "Luxury Property False Farming Claim"
+
+**Verify**:
+```sql
+SELECT case_id, taxpayer_name, property_address, 
+       land_value, exemption_type, fraud_category
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE case_id = 'CASE-LT-FRAUD-LUXURY-001';
+```
+
+---
+
+## TC-QRO-008: Related Party Undervaluation
+
+**Test**: Shell game between related entities
+
+**Test Case**: Chen Investment Transfer (CASE-TD-FRAUD-RELATED-001)
+
+**Expected**:
+- Buyer ABN: 73926481957
+- Seller ABN: 73926481957 (SAME!)
+- Declared: $1,350,000
+- Market Value: $2,100,000 (55% higher)
+- Duty Shortfall: ~$33,750
+- Property: Fortitude Valley commercial
+- **RED FLAG**: Entity selling to itself at undervalued price
+
+**Verify**:
+```sql
+SELECT case_id, buyer_abn, seller_abn,
+       declared_value, market_value,
+       (market_value - declared_value) as undervaluation,
+       related_party_transaction, tax_shortfall
+FROM main.qro_fraud_detection.transfer_duty_raw t
+JOIN main.qro_fraud_detection.revenue_cases_silver c
+  ON t.transaction_id = c.source_record_id
+WHERE c.case_id = 'CASE-TD-FRAUD-RELATED-001';
+```
+
+---
+
+## TC-QRO-009: Time Travel - Case Progression
+
+**Test**: View case history using Delta Lake CDC
+
+**Steps**:
+1. View case CASE-PT-FRAUD-MINING-001
+2. Click "History" tab
+3. Review versions
+
+**Expected Versions**:
+```
+V1: Status=Open, Assigned=null, Risk=88
+V2: Status=Open, Assigned=revenue.officer3, Risk=88  
+V3: Status=Investigation, Assigned=revenue.officer3, Risk=88
+V4: Status=Compliance Action, Action="Full Tax Audit", Risk=88
+```
+
+**Verify**:
+```sql
+SELECT _commit_version, _commit_timestamp, 
+       status, assigned_to, compliance_action
+FROM table_changes('main.qro_fraud_detection.revenue_cases_silver', 0)
+WHERE case_id = 'CASE-PT-FRAUD-MINING-001'
+ORDER BY _commit_version;
+```
+
+---
+
+## TC-QRO-010: ServiceNow Escalation
+
+**Test**: Create incident in ServiceNow
+
+**Steps**:
+1. View CASE-PT-FRAUD-MINING-001
+2. Click "Create ServiceNow Incident"
+3. Confirm
+
+**Expected**:
+- Success alert with incident number
+- ServiceNow ticket created with:
+  * Short Description: "QRO Revenue Case: CASE-PT-FRAUD-MINING-001"
+  * Description contains ABN, shortfall, taxpayer
+  * Urgency: 1 (Critical)
+  * Assignment: "Payroll Tax Compliance Team"
+  * Custom field: u_qro_case_id
+
+**Verify ServiceNow**:
+Search for incident, check fields populated
+
+**Verify Database**:
+```sql
+SELECT * FROM main.qro_fraud_detection.servicenow_incidents
+WHERE case_id = 'CASE-PT-FRAUD-MINING-001';
+```
+
+---
+
+## TC-QRO-011: Geographic Filtering
+
+**Test**: Regional office case allocation
+
+**Steps**:
+1. Create rule: "Far North Queensland Cases"
+2. Filters:
+   - Regional Office: "Far North Queensland"
+   - OR Postcodes: 487X, 488X
+   - OR Suburbs: Cairns, Townsville
+
+**Expected**:
+- Only cases from FNQ region
+- Excludes Brisbane/Gold Coast
+
+**Verify**:
+```sql
+SELECT case_id, taxpayer_suburb, taxpayer_postcode, regional_office
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+WHERE regional_office = 'Far North Queensland'
+   OR taxpayer_postcode LIKE '487%'
+   OR taxpayer_suburb IN ('Cairns', 'Townsville');
+```
+
+---
+
+## TC-QRO-012: Financial Year Filtering
+
+**Test**: Australian financial year (July-June) filtering
+
+**Steps**:
+1. Create rule for "FY 2023-24 Cases"
+2. Filter: Financial Year = "2023-24"
+
+**Expected**:
+- Tax periods between 1 July 2023 - 30 June 2024
+- Formatted as "2023-24" not "2023-2024"
+
+**Verify**:
+```sql
+SELECT case_id, tax_period_start, tax_period_end, financial_year
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+WHERE financial_year = '2023-24';
+```
+
+---
+
+## TC-QRO-013: ABN Formatting
+
+**Test**: ABN displays with spaces (XX XXX XXX XXX)
+
+**Steps**:
+1. View any case details
+2. Check ABN display format
+
+**Expected**:
+- Stored: "51824753556"
+- Displayed: "51 824 753 556"
+
+**Code Check**:
+```javascript
+// Should format ABN in React component
+const formatABN = (abn) => {
+  return abn.replace(/(\d{2})(\d{3})(\d{3})(\d{3})/, '$1 $2 $3 $4');
+};
+```
+
+---
+
+## TC-QRO-014: SLA Breach Detection
+
+**Test**: Cases breaching service standards flagged
+
+**Rule**: "SLA Breached - Urgent"
+**Filter**: sla_breached = true
+
+**Expected**:
+Cases where:
+- Open > 5 days
+- Under Review > 14 days  
+- Investigation > 30 days
+- Compliance Action > 60 days
+
+**Verify**:
+```sql
+SELECT case_id, status, age_days, business_days_age, sla_breached
+FROM main.qro_fraud_detection.revenue_cases_gold_active
+WHERE sla_breached = true
+ORDER BY business_days_age DESC;
+```
+
+---
+
+## TC-QRO-015: Multi-Officer Isolation
+
+**Test**: Officers only see their own rules
+
+**Setup**:
+- Officer1 creates "My Mining Cases"
+- Officer2 creates "My Land Tax Cases"
+
+**Steps**:
+1. Login as Officer1
+2. View rules list
+
+**Expected**:
+- Officer1 sees ONLY their rules
+- Officer2's rules hidden
+- Unless shared explicitly
+
+**Verify**:
+```sql
+-- Officer1's view
+SELECT rule_name FROM main.qro_fraud_detection.officer_case_rules
+WHERE officer_email = 'revenue.officer1@qro.qld.gov.au'
+  AND is_active = true;
+-- Should NOT include Officer2's rules
+```
+
+---
+
+## TC-QRO-016: Performance - Large Result Sets
+
+**Test**: App handles 1000+ cases smoothly
+
+**Steps**:
+1. Create rule returning 1000+ cases (e.g., "All Payroll Tax")
+2. Measure load time
+3. Scroll through list
+4. Open case details
+
+**Performance Targets**:
+| Operation | Target | Max |
+|-----------|--------|-----|
+| Apply rule | 2s | 4s |
+| Case list render | 1s | 3s |
+| Case details | 1s | 2s |
+| History load | 2s | 3s |
+
+---
+
+## TC-QRO-017: Penalty Calculation Accuracy
+
+**Test**: Verify 20% vs 75% penalties applied correctly
+
+**Cases to Check**:
+1. Simple late payment → 20% penalty
+2. Fraud case → 75% penalty
+
+**Verify**:
+```sql
+-- 20% penalty for late payment
+SELECT case_id, tax_shortfall, penalty_amount,
+       ROUND(tax_shortfall * 0.20, 2) as expected_penalty
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE fraud_category = 'Standard Review'
+  AND penalty_amount > 0
+LIMIT 5;
+
+-- 75% penalty for fraud
+SELECT case_id, fraud_category, tax_shortfall, penalty_amount,
+       ROUND(tax_shortfall * 0.75, 2) as expected_penalty
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE fraud_category LIKE '%Interstate%'
+   OR fraud_category LIKE '%False%'
+LIMIT 5;
+```
+
+**Pass Criteria**: All penalties within $1.00 of expected
+
+---
+
+## TC-QRO-018: Interest Calculation
+
+**Test**: 8% p.a. interest calculated correctly
+
+**Formula**: `Shortfall * 0.08 * (days_overdue / 365)`
+
+**Verify**:
+```sql
+SELECT case_id, tax_shortfall, 
+       datediff(current_date(), lodgement_due_date) as days_late,
+       interest_amount,
+       ROUND(tax_shortfall * 0.08 * 
+             datediff(current_date(), lodgement_due_date) / 365, 2) as expected_interest,
+       ABS(interest_amount - expected_interest) as variance
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE interest_amount > 0
+  AND ABS(interest_amount - expected_interest) > 1.00;
+```
+
+**Pass Criteria**: Variance < $1.00 for all cases
+
+---
+
+## TC-QRO-019: Data Lineage Display
+
+**Test**: Trace case from SAP to Gold layer
+
+**Steps**:
+1. View any case details
+2. Click "Lineage" tab
+
+**Expected Flow**:
+```
+SAP_TAX_PRD (Source)
+    ↓
+bronze.payroll_tax_lodgements_raw
+    ↓
+silver.revenue_cases_silver
+    ↓
+gold.revenue_cases_gold_active
+```
+
+**Verify**:
+```sql
+SELECT upstream_table_name, downstream_table_name, created_by
+FROM system.access.table_lineage
+WHERE downstream_table_name LIKE '%revenue_cases%'
+ORDER BY created_at;
+```
+
+---
+
+## TC-QRO-020: Industry Code Filtering
+
+**Test**: ANZSIC industry code filtering works
+
+**Test All Major QLD Industries**:
+| Code | Industry | Expected Cases |
+|------|----------|----------------|
+| 0600 | Coal Mining | 200+ |
+| 4400 | Accommodation | 150+ |
+| 4500 | Food Services | 180+ |
+| 3000 | Construction | 250+ |
+| 6000 | Retail Trade | 200+ |
+
+**Create Rules**:
+```sql
+-- Test each industry filter
+{"industry_codes": ["0600"]}  -- Mining
+{"industry_codes": ["4400", "4500"]}  -- Hospitality
+{"industry_codes": ["3000"]}  -- Construction
+```
+
+---
+
+## TC-QRO-021: Foreign Buyer Surcharge
+
+**Test**: Detect missing 7% foreign buyer additional duty
+
+**Test Case**: CASE-TD-FRAUD-FOREIGN-001
+
+**Expected**:
+- Property: Main Beach unit
+- Declared: $1,250,000
+- Foreign Buyer: TRUE
+- Standard Duty: $49,350
+- **Should Also Pay**: 7% surcharge = $87,500
+- **Total Due**: $136,850
+- **Actually Paid**: $49,350
+- **Shortfall**: $87,500
+
+---
+
+## TC-QRO-022: Concurrent Officer Access
+
+**Test**: Multiple officers can work simultaneously
+
+**Setup**:
+- 5 officers login concurrently
+- Each applies different rules
+- Each views different cases
+
+**Expected**:
+- No conflicts
+- Each sees their filtered view
+- No cross-contamination
+
+**Monitor**:
+```sql
+-- Check concurrent sessions
+SELECT user_identity.email, action_name, event_time
+FROM system.access.audit
+WHERE request_params.table_name LIKE '%revenue_cases%'
+  AND event_time >= current_timestamp() - INTERVAL 10 MINUTES
+ORDER BY event_time DESC;
+```
+
+---
+
+## Performance Benchmarks
+
+Based on QRO annual volumes:
+
+| Tax Type | Annual Lodgements | Expected Active Cases | Query Target |
+|----------|-------------------|----------------------|--------------|
+| Payroll Tax | 32,000 | 960 | < 3s |
+| Land Tax | 420,000 | 12,600 | < 4s |
+| Transfer Duty | 105,000 | 3,150 | < 3s |
+| **Total** | **557,000** | **16,710** | **< 5s** |
+
+---
+
+## Security Testing
+
+### TC-QRO-SEC-01: Row-Level Security
+```sql
+-- Test Unity Catalog RLS
+-- Officer should only see cases they have access to
+SELECT COUNT(*) FROM main.qro_fraud_detection.revenue_cases_silver;
+-- Count should respect RLS grants
+```
+
+### TC-QRO-SEC-02: ABN Privacy
+- Ensure ABN only visible to authorized officers
+- Test with read-only analyst account
+
+### TC-QRO-SEC-03: Audit Logging
+```sql
+-- Every case view should be logged
+SELECT * FROM system.access.audit
+WHERE request_params.table_name = 'main.qro_fraud_detection.revenue_cases_silver'
+  AND action_name = 'SELECT'
+ORDER BY event_time DESC
+LIMIT 10;
+```
+
+---
+
+## Regression Test Suite
+
+**Run before each release**:
+
+```bash
+# Quick smoke test
+pytest tests/test_qro_rules.py::test_mining_rule
+pytest tests/test_qro_rules.py::test_hospitality_rule
+pytest tests/test_qro_calculations.py::test_penalties
+pytest tests/test_qro_calculations.py::test_interest
+pytest tests/test_qro_servicenow.py::test_create_incident
+
+# Full regression
+pytest tests/ --qro-regression
+```
+
+---
+
+## Test Data Summary
+
+After setup, verify:
+
+```sql
+SELECT 
+  case_type,
+  COUNT(*) as cases,
+  SUM(total_exposure) as total_exposure,
+  AVG(risk_score) as avg_risk,
+  COUNT(CASE WHEN severity='Critical' THEN 1 END) as critical
+FROM main.qro_fraud_detection.revenue_cases_silver
+GROUP BY case_type;
+```
+
+**Expected**:
+| Case Type | Cases | Total Exposure | Avg Risk | Critical |
+|-----------|-------|----------------|----------|----------|
+| Payroll Tax | 3000+ | $45M+ | 55 | 180+ |
+| Land Tax | 2000+ | $28M+ | 48 | 120+ |
+| Transfer Duty | 1500+ | $22M+ | 52 | 95+ |
+
+---
+
+## Sign-Off
+
+### Functional Testing
+- [ ] Rule creation (TC-QRO-001, 002)
+- [ ] Filter accuracy (TC-QRO-002, 003)
+- [ ] Fraud detection (TC-QRO-004-008)
+- [ ] Time travel (TC-QRO-009)
+- [ ] ServiceNow integration (TC-QRO-010)
+
+**Tester**: _________________ **Date**: _________
+
+### QLD-Specific Validation
+- [ ] ABN formatting (TC-QRO-013)
+- [ ] Industry codes (TC-QRO-020)
+- [ ] Financial year (TC-QRO-012)
+- [ ] QLD postcodes (Geographic)
+- [ ] Tax rate accuracy
+
+**Tester**: _________________ **Date**: _________
+
+### Performance & Security
+- [ ] 1000+ cases load < 5s (TC-QRO-016)
+- [ ] Concurrent access (TC-QRO-022)
+- [ ] Row-level security (SEC-01)
+- [ ] Audit logging (SEC-03)
+
+**Tester**: _________________ **Date**: _________
+
+### Calculation Accuracy
+- [ ] Penalties 20%/75% (TC-QRO-017)
+- [ ] Interest 8% p.a. (TC-QRO-018)
+- [ ] Total exposure (TC-QRO-003)
+- [ ] Payroll tax threshold $6.5M
+- [ ] Land tax threshold $600K
+
+**Tester**: _________________ **Date**: _________
+
+---
+
+## Known Issues Template
+
+```
+Issue ID: QRO-BUG-XXX
+Severity: Critical/High/Medium/Low
+Component: Rules/Cases/ServiceNow/Calculations
+
+Description:
+Steps to Reproduce:
+Expected:
+Actual:
+SQL to Reproduce:
+
+SELECT ... WHERE case_id = 'XXX';
+
+Assigned To:
+Status: Open/In Progress/Resolved
+```
+
+---
+
+## QRO Business Owner Approval
+
+**Compliance Manager**: _________________ Date: _______
+
+**Payroll Tax Unit Lead**: _________________ Date: _______
+
+**Legal Review**: _________________ Date: _______
+
+**Ready for Production**: ☐ Yes  ☐ No (issues: _______ )

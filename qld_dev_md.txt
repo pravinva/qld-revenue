@@ -1,0 +1,281 @@
+# Queensland Revenue Office - Fraud Case Management System
+## Developer Implementation Guide
+
+## Overview
+Build a Databricks App for QRO revenue officers to filter, investigate, and escalate tax fraud cases.
+
+## Architecture
+```
+SAP Tax Systems → Bronze → Silver (Truth) → Gold (Filtered) → Databricks App
+```
+
+## Quick Start
+```bash
+# 1. Run data generation scripts in order
+databricks-sql < 01_create_bronze_tables.sql
+databricks-sql < 02_generate_test_data.sql  
+databricks-sql < 03_create_silver_table.sql
+databricks-sql < 04_populate_silver.sql
+databricks-sql < 05_create_gold.sql
+
+# 2. Deploy app
+databricks apps create qro-fraud-mgmt
+databricks apps deploy qro-fraud-mgmt
+
+# 3. Access at https://qro.cloud.databricks.com/apps/qro-fraud-mgmt
+```
+
+## Database Schema Summary
+
+### Silver Layer (Source of Truth)
+```sql
+main.qro_fraud_detection.revenue_cases_silver
+- case_id (PK)
+- case_type: Payroll Tax, Land Tax, Transfer Duty
+- fraud_category, status, priority, severity
+- tax_amount_assessed, tax_paid, tax_shortfall
+- penalty_amount, interest_amount, total_exposure
+- taxpayer_abn, name, type, industry
+- location: postcode, suburb, state
+- risk_score (0-100), risk_factors (JSON)
+- assigned_to, compliance_officer
+- investigation dates, compliance_action, outcome
+- CDC enabled for time travel
+```
+
+### Gold Layer (Filtered)
+```sql
+main.qro_fraud_detection.revenue_cases_gold_active
+- All silver columns PLUS:
+- severity (calculated)
+- age_days, business_days_age, days_overdue
+- sla_breached (bool)
+- financial_year (2023-24 format)
+- regional_office (Brisbane, Gold Coast, etc)
+- allocation_priority (1-6)
+```
+
+### Officer Rules
+```sql
+main.qro_fraud_detection.officer_case_rules
+- rule_id, officer_email, rule_name
+- filter_conditions (JSON)
+- business_unit, is_shared
+```
+
+## Complete SQL Scripts
+
+Save as `qro_setup.sql`:
+```sql
+-- ============================================================================
+-- QRO FRAUD DETECTION - COMPLETE SETUP
+-- Run in Databricks SQL Editor
+-- ============================================================================
+
+-- STEP 1: Create Bronze Tables
+CREATE TABLE main.qro_fraud_detection.payroll_tax_lodgements_raw (
+  lodgement_id STRING, abn STRING, business_name STRING, trading_name STRING,
+  industry_code STRING, period_start_date DATE, period_end_date DATE,
+  lodgement_due_date DATE, lodgement_date DATE,
+  total_wages DECIMAL(18,2), taxable_wages DECIMAL(18,2), tax_rate DECIMAL(5,4),
+  tax_assessed DECIMAL(18,2), tax_paid DECIMAL(18,2),
+  employee_count_qld INT, employee_count_australia INT, employee_count_total INT,
+  business_address_state STRING, business_address_postcode STRING, 
+  business_address_suburb STRING, lodgement_channel STRING,
+  lodged_by STRING, agent_name STRING, sap_system STRING,
+  _ingestion_timestamp TIMESTAMP
+) USING DELTA;
+
+CREATE TABLE main.qro_fraud_detection.land_tax_assessments_raw (
+  assessment_id STRING, abn STRING, owner_name STRING, owner_type STRING,
+  property_id STRING, property_address STRING, property_suburb STRING,
+  property_postcode STRING, property_type STRING,
+  land_value DECIMAL(18,2), improvement_value DECIMAL(18,2), 
+  total_value DECIMAL(18,2), valuation_date DATE,
+  taxable_value DECIMAL(18,2), exemption_claimed BOOLEAN, exemption_type STRING,
+  tax_assessed DECIMAL(18,2), tax_paid DECIMAL(18,2),
+  tax_year STRING, assessment_date DATE, payment_due_date DATE,
+  sap_system STRING, _ingestion_timestamp TIMESTAMP
+) USING DELTA;
+
+CREATE TABLE main.qro_fraud_detection.transfer_duty_raw (
+  transaction_id STRING, buyer_name STRING, buyer_abn STRING,
+  seller_name STRING, seller_abn STRING, property_address STRING,
+  property_suburb STRING, property_postcode STRING, property_type STRING,
+  contract_date DATE, settlement_date DATE,
+  declared_value DECIMAL(18,2), market_value DECIMAL(18,2),
+  dutiable_value DECIMAL(18,2), duty_assessed DECIMAL(18,2), duty_paid DECIMAL(18,2),
+  first_home_buyer BOOLEAN, foreign_buyer BOOLEAN, related_party_transaction BOOLEAN,
+  lodgement_date DATE, sap_system STRING, _ingestion_timestamp TIMESTAMP
+) USING DELTA;
+
+-- STEP 2: Generate Test Data (see qro_test_data.sql for full scripts)
+-- Generates 3000 payroll, 2000 land tax, 1500 transfer duty records
+
+-- STEP 3: Create Silver Table
+CREATE TABLE main.qro_fraud_detection.revenue_cases_silver (
+  case_id STRING NOT NULL,
+  case_type STRING, fraud_category STRING, status STRING, priority STRING,
+  tax_amount_assessed DECIMAL(18,2), tax_amount_paid DECIMAL(18,2), 
+  tax_shortfall DECIMAL(18,2), penalty_amount DECIMAL(18,2), 
+  interest_amount DECIMAL(18,2), total_exposure DECIMAL(18,2),
+  taxpayer_abn STRING, taxpayer_name STRING, taxpayer_type STRING,
+  industry_code STRING, industry_description STRING,
+  taxpayer_postcode STRING, taxpayer_suburb STRING, taxpayer_state STRING,
+  tax_period_start DATE, tax_period_end DATE,
+  risk_score INT, risk_factors STRING, detection_method STRING,
+  assigned_to STRING, compliance_officer STRING,
+  created_at TIMESTAMP, updated_at TIMESTAMP, closed_at TIMESTAMP,
+  source_system STRING, source_record_id STRING,
+  is_test_data BOOLEAN, requires_legal_review BOOLEAN, media_sensitive BOOLEAN
+) USING DELTA
+TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+
+ALTER TABLE main.qro_fraud_detection.revenue_cases_silver 
+ADD CONSTRAINT cases_pk PRIMARY KEY (case_id);
+
+-- STEP 4: Create Gold Table
+CREATE OR REPLACE TABLE main.qro_fraud_detection.revenue_cases_gold_active AS
+SELECT *, 
+  CASE 
+    WHEN total_exposure > 500000 AND risk_score > 85 THEN 'Critical'
+    WHEN total_exposure > 200000 AND risk_score > 70 THEN 'High'
+    WHEN total_exposure > 50000 OR risk_score > 50 THEN 'Medium'
+    ELSE 'Low'
+  END as severity,
+  datediff(current_timestamp(), created_at) as age_days,
+  CASE 
+    WHEN status = 'Open' AND datediff(current_date(), created_at) > 5 THEN true
+    WHEN status = 'Under Review' AND datediff(current_date(), created_at) > 14 THEN true
+    ELSE false
+  END as sla_breached
+FROM main.qro_fraud_detection.revenue_cases_silver
+WHERE status IN ('Open', 'Under Review', 'Investigation', 'Compliance Action')
+  AND is_test_data = false;
+
+-- STEP 5: Create Rules Table
+CREATE TABLE main.qro_fraud_detection.officer_case_rules (
+  rule_id STRING NOT NULL, officer_email STRING NOT NULL,
+  rule_name STRING, filter_conditions STRING,
+  created_at TIMESTAMP, is_active BOOLEAN, last_used_at TIMESTAMP
+) USING DELTA;
+```
+
+## Python Backend
+Save as `qro_backend.py` in your Databricks App:
+
+```python
+from pyspark.sql import functions as F
+import json
+
+def apply_officer_rule(officer_email, rule_id=None):
+    """Apply filtering rule to cases."""
+    if rule_id:
+        rule = spark.table("main.qro_fraud_detection.officer_case_rules")\
+            .filter(f"rule_id='{rule_id}'").first()
+    else:
+        rule = spark.table("main.qro_fraud_detection.officer_case_rules")\
+            .filter(f"officer_email='{officer_email}'")\
+            .orderBy(F.desc("last_used_at")).first()
+    
+    cases = spark.table("main.qro_fraud_detection.revenue_cases_gold_active")
+    
+    if rule:
+        conds = json.loads(rule.filter_conditions)
+        if conds.get('case_types'):
+            cases = cases.filter(F.col("case_type").isin(conds['case_types']))
+        if conds.get('tax_shortfall_min'):
+            cases = cases.filter(F.col("tax_shortfall") >= conds['tax_shortfall_min'])
+        # Add more filters...
+    
+    return cases.toPandas().to_dict('records')
+
+def get_case_history(case_id):
+    """Delta Lake time travel."""
+    return spark.sql(f"""
+        SELECT _commit_version, _commit_timestamp, status, risk_score, assigned_to
+        FROM table_changes('main.qro_fraud_detection.revenue_cases_silver', 0)
+        WHERE case_id = '{case_id}'
+        ORDER BY _commit_version DESC
+    """).toPandas().to_dict('records')
+
+def create_servicenow_incident(case_data, officer_email):
+    """Create ServiceNow ticket."""
+    import requests
+    payload = {
+        'short_description': f"QRO Revenue Case: {case_data['case_id']}",
+        'description': f"ABN: {case_data['taxpayer_abn']}\nShortfall: ${case_data['tax_shortfall']:,.2f}",
+        'urgency': 1 if case_data['severity'] == 'Critical' else 3,
+        'assignment_group': 'Revenue Compliance Team'
+    }
+    # Make ServiceNow API call...
+    return {'incident_number': 'INC0012345', 'status': 'success'}
+```
+
+## React Frontend
+Save as `app.tsx`:
+
+```typescript
+import React, {useState, useEffect} from 'react';
+
+export default function QROFraudApp() {
+  const [cases, setCases] = useState([]);
+  const [selectedCase, setSelectedCase] = useState(null);
+  
+  const loadCases = async () => {
+    const data = await window.apply_officer_rule('officer@qro.qld.gov.au');
+    setCases(data);
+  };
+  
+  return (
+    <div style={{padding: '20px'}}>
+      <h1>QRO Revenue Fraud Cases</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>Case ID</th><th>Type</th><th>Taxpayer</th>
+            <th>Shortfall</th><th>Risk</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cases.map(c => (
+            <tr key={c.case_id} onClick={() => setSelectedCase(c)}>
+              <td>{c.case_id}</td>
+              <td>{c.case_type}</td>
+              <td>{c.taxpayer_name}</td>
+              <td>${c.tax_shortfall?.toLocaleString()}</td>
+              <td>{c.risk_score}</td>
+              <td>{c.status}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+## Test Data Highlights
+
+After running setup, you'll have:
+- **3000 Payroll Tax cases** - Mining, hospitality, construction
+- **2000 Land Tax cases** - Luxury properties, false exemptions  
+- **1500 Transfer Duty cases** - Related party, foreign buyers
+- **6 Fraud patterns** - Real QRO scenarios baked in
+
+Key fraud cases to test:
+1. `CASE-PT-FRAUD-MINING-001` - $285K mining wage shifting
+2. `CASE-PT-FRAUD-HOSP-001` - Gold Coast nightclub cash underreporting
+3. `CASE-LT-FRAUD-LUXURY-001` - Noosa mansion claiming farm exemption
+4. `CASE-TD-FRAUD-RELATED-001` - Related party $750K undervaluation
+
+## Deployment Checklist
+- [ ] Unity Catalog schema created
+- [ ] All 3 bronze tables populated
+- [ ] Silver table has 6500+ cases
+- [ ] Gold table shows ~4000 active cases
+- [ ] Sample rules created
+- [ ] Data quality checks pass
+- [ ] Python backend tested
+- [ ] React frontend renders
+- [ ] ServiceNow integration configured

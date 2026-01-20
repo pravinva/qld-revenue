@@ -527,21 +527,98 @@ def main() -> None:
     st.dataframe(d, use_container_width=True, height=360)
 
     st.markdown("### Case Details")
-    selected_case_id = st.text_input("Enter Case ID", value=str(d.iloc[0]["case_id"]))
+
+    selected_case_id = st.text_input("Case ID", value=str(d.iloc[0]["case_id"]))
     case_row = applied[applied["case_id"] == selected_case_id]
     if case_row.empty:
         st.warning("Case not found in current filtered view.")
         return
 
     r = case_row.iloc[0].to_dict()
-    left, right = st.columns([2, 1])
-    with left:
-        st.json(r, expanded=False)
-    with right:
-        st.markdown("#### Actions")
-        if st.button("Show Delta History"):
-            hist = _case_history(selected_case_id)
-            st.dataframe(hist, use_container_width=True, height=240)
+
+    # Drill-down header
+    hdr_left, hdr_right = st.columns([3, 2])
+    with hdr_left:
+        st.markdown(f"**{r.get('case_id', '')}**")
+        st.caption(f"{r.get('case_type','')} • {r.get('case_domain','')} • {r.get('severity','')} • Status: {r.get('status','')}")
+        if r.get('case_reason'):
+            st.markdown(f"**Reason:** {r.get('case_reason')}")
+    with hdr_right:
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            st.metric("Risk", r.get("risk_score", "-"))
+        with a2:
+            try:
+                shortfall = float(pd.to_numeric(pd.Series([r.get('tax_shortfall')]), errors='coerce').fillna(0).iloc[0])
+            except Exception:
+                shortfall = 0.0
+            st.metric("Shortfall", f"${shortfall:,.0f}")
+        with a3:
+            try:
+                exposure = float(pd.to_numeric(pd.Series([r.get('total_exposure')]), errors='coerce').fillna(0).iloc[0])
+            except Exception:
+                exposure = 0.0
+            st.metric("Exposure", f"${exposure:,.0f}")
+
+    tab_overview, tab_fin, tab_risk, tab_history, tab_activity = st.tabs(
+        ["Overview", "Financials", "Risk & Factors", "History", "Activity"]
+    )
+
+    with tab_overview:
+        o1, o2, o3 = st.columns(3)
+        with o1:
+            st.markdown("**Taxpayer**")
+            st.write(r.get("taxpayer_name", "-"))
+            st.write(format_abn(str(r.get("taxpayer_abn", ""))) if r.get("taxpayer_abn") else "-")
+            st.write(r.get("taxpayer_type", "-"))
+        with o2:
+            st.markdown("**Location**")
+            st.write(r.get("taxpayer_suburb", "-"))
+            st.write(r.get("taxpayer_postcode", "-"))
+            st.write(r.get("taxpayer_state", "-"))
+        with o3:
+            st.markdown("**Routing**")
+            st.write(f"Assigned to: {r.get('assigned_to') or '-'}")
+            st.write(f"Compliance officer: {r.get('compliance_officer') or '-'}")
+            st.write(f"Created: {r.get('created_at') or '-'}")
+
+        with st.expander("Raw case record", expanded=False):
+            st.json(r, expanded=False)
+
+    with tab_fin:
+        f1, f2, f3, f4 = st.columns(4)
+        def _num(x):
+            return float(pd.to_numeric(pd.Series([x]), errors='coerce').fillna(0).iloc[0])
+        with f1:
+            st.metric("Assessed", f"${_num(r.get('tax_amount_assessed')):,.0f}")
+        with f2:
+            st.metric("Paid", f"${_num(r.get('tax_amount_paid')):,.0f}")
+        with f3:
+            st.metric("Penalty", f"${_num(r.get('penalty_amount')):,.0f}")
+        with f4:
+            st.metric("Interest", f"${_num(r.get('interest_amount')):,.0f}")
+
+    with tab_risk:
+        st.markdown("**Fraud suspected**")
+        st.write(bool(r.get("is_fraud_suspected")) if r.get("is_fraud_suspected") is not None else "-")
+        st.markdown("**Fraud / category**")
+        st.write(r.get("fraud_category", "-"))
+        st.markdown("**Risk factors**")
+        rf = r.get("risk_factors")
+        if isinstance(rf, str) and rf.strip():
+            try:
+                st.json(json.loads(rf))
+            except Exception:
+                st.code(rf)
+        else:
+            st.write("-")
+
+    with tab_history:
+        st.caption("Delta history (table_changes on Silver)")
+        hist = _case_history(selected_case_id)
+        st.dataframe(hist, use_container_width=True, height=260)
+
+    with tab_activity:
         st.markdown("#### Case Management")
         new_status = st.selectbox(
             "Set status",
@@ -551,7 +628,7 @@ def main() -> None:
         )
         note = st.text_area("Add note", value="", key="cm_note", height=80)
 
-        cma, cmb = st.columns(2)
+        cma, cmb, cmc = st.columns(3)
         with cma:
             if st.button("Assign to me"):
                 _upsert_case_state(selected_case_id, assigned_to=officer_email)
@@ -564,18 +641,18 @@ def main() -> None:
                 _insert_case_event(selected_case_id, officer_email, "UNASSIGN", assigned_to="")
                 st.cache_data.clear()
                 st.success("Unassigned.")
+        with cmc:
+            if st.button("Save status/note"):
+                status_val = None if new_status == "(no change)" else new_status
+                if status_val is not None:
+                    _upsert_case_state(selected_case_id, status=status_val)
+                    _insert_case_event(selected_case_id, officer_email, "STATUS_CHANGE", new_status=status_val)
+                if note.strip():
+                    _insert_case_event(selected_case_id, officer_email, "NOTE", note=note.strip())
+                st.cache_data.clear()
+                st.success("Saved.")
 
-        if st.button("Save status/note"):
-            status_val = None if new_status == "(no change)" else new_status
-            if status_val is not None:
-                _upsert_case_state(selected_case_id, status=status_val)
-                _insert_case_event(selected_case_id, officer_email, "STATUS_CHANGE", new_status=status_val)
-            if note.strip():
-                _insert_case_event(selected_case_id, officer_email, "NOTE", note=note.strip())
-            st.cache_data.clear()
-            st.success("Saved.")
-
-        if st.button("Create ServiceNow Incident"):
+        with st.expander("Prepare ServiceNow Incident (demo)", expanded=False):
             payload = {
                 "short_description": f"QRO Revenue Case: {r.get('case_id')}",
                 "description": f"ABN: {r.get('taxpayer_abn')}\nShortfall: {r.get('tax_shortfall')}",
@@ -583,7 +660,6 @@ def main() -> None:
                 "assignment_group": "Revenue Compliance Team",
                 "u_qro_case_id": r.get("case_id"),
             }
-            st.success("Prepared ServiceNow payload (demo).")
             st.json(payload)
 
 

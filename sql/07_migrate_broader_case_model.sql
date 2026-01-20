@@ -21,7 +21,7 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN 'Fraud'
-    WHEN tax_shortfall > 0 AND greatest(datediff(current_date(), lodgement_due_date), 0) > 30 THEN 'Debt'
+    WHEN tax_shortfall > 0 AND (tax_amount_paid / tax_amount_assessed) < 0.75 THEN 'Debt'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN 'Compliance'
     ELSE 'Service'
   END,
@@ -43,7 +43,7 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN concat('Fraud signal: ', fraud_category)
-    WHEN tax_shortfall > 0 AND greatest(datediff(current_date(), lodgement_due_date), 0) > 30 THEN 'Arrears / debt follow-up'
+    WHEN tax_shortfall > 0 AND (tax_amount_paid / tax_amount_assessed) < 0.75 THEN 'Arrears / debt follow-up'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN concat('Compliance review: ', fraud_category)
     ELSE 'Processing / customer service'
   END

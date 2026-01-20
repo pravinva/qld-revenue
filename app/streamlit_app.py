@@ -383,26 +383,43 @@ def main() -> None:
             st.session_state["selected_rule_id"] = rid
             st.cache_data.clear()
 
-    # Cases (prefer warehouse)
-    applied = None
 
-    # If a rule is selected, apply filters in SQL (faster than fetching everything)
+    # Quick filters (always applied on top of either rule filters or default view)
+    st.markdown("### Quick Filters")
+    f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 1, 2])
+    with f1:
+        q_domain = st.multiselect("Domain", ["Fraud", "Compliance", "Debt", "Objection", "Service", "Registration"], default=[])
+    with f2:
+        q_type = st.multiselect("Case type", ["Payroll Tax", "Land Tax", "Transfer Duty"], default=[])
+    with f3:
+        q_status = st.multiselect("Status", ["Open", "Under Review", "Investigation", "Compliance Action", "Closed"], default=[])
+    with f4:
+        q_min_risk = st.number_input("Min risk", min_value=0, max_value=100, value=0, step=1)
+    with f5:
+        q_search = st.text_input("Search (case id / taxpayer)", value="")
+
+    g1, g2, g3 = st.columns([1, 1, 2])
+    with g1:
+        q_min_shortfall = st.number_input("Min shortfall", min_value=0, value=0, step=1000)
+    with g2:
+        q_assignment = st.selectbox("Assignment", ["Any", "Unassigned", "Assigned to me"], index=0)
+
+    where = ["1=1"]
+
+    # Rule filters (saved)
     if selected_rule_id and not rules_df.empty:
         row = rules_df[rules_df["rule_id"] == selected_rule_id]
         if not row.empty:
             r0 = row.iloc[0].to_dict()
             conds = json.loads(r0.get("filter_conditions") or "{}")
-            where = ["1=1"]
+
             if conds.get("case_domains"):
                 vals = ",".join(_sql_quote(x) for x in conds["case_domains"])
                 where.append(f"case_domain IN ({vals})")
-            # existing filters
-            
+            if conds.get("case_types"):
                 vals = ",".join(_sql_quote(x) for x in conds["case_types"])
                 where.append(f"case_type IN ({vals})")
             if conds.get("industry_codes"):
-                # In this demo dataset, industry_code is populated for Payroll Tax cases.
-                # If the rule excludes Payroll Tax, applying industry filter would yield 0 rows.
                 ct = set(conds.get("case_types") or [])
                 if not ct or ("Payroll Tax" in ct):
                     vals = ",".join(_sql_quote(x) for x in conds["industry_codes"])
@@ -414,14 +431,37 @@ def main() -> None:
             if conds.get("risk_score_min") is not None:
                 where.append(f"risk_score >= {int(conds['risk_score_min'])}")
 
-            stmt = f"""
-              SELECT *
-              FROM {GOLD_TABLE_ACTIVE}
-              WHERE {' AND '.join(where)}
-              LIMIT 5000
-            """
-            applied = _sql_fetch_df(stmt)
             _mark_rule_used(selected_rule_id)
+
+    # Quick filters (ad hoc)
+    if q_domain:
+        vals = ",".join(_sql_quote(x) for x in q_domain)
+        where.append(f"case_domain IN ({vals})")
+    if q_type:
+        vals = ",".join(_sql_quote(x) for x in q_type)
+        where.append(f"case_type IN ({vals})")
+    if q_status:
+        vals = ",".join(_sql_quote(x) for x in q_status)
+        where.append(f"status IN ({vals})")
+    if q_min_risk and int(q_min_risk) > 0:
+        where.append(f"risk_score >= {int(q_min_risk)}")
+    if q_min_shortfall and float(q_min_shortfall) > 0:
+        where.append(f"tax_shortfall >= {float(q_min_shortfall)}")
+    if q_assignment == "Unassigned":
+        where.append("(assigned_to IS NULL OR assigned_to = '')")
+    elif q_assignment == "Assigned to me":
+        where.append(f"assigned_to = {_sql_quote(officer_email)}")
+    if q_search.strip():
+        s = q_search.strip().lower().replace("'", "''")
+        where.append(f"(lower(case_id) LIKE '%{s}%' OR lower(taxpayer_name) LIKE '%{s}%')")
+
+    stmt = f"""
+      SELECT *
+      FROM {GOLD_TABLE_ACTIVE}
+      WHERE {' AND '.join(where)}
+      LIMIT 5000
+    """
+    applied = _sql_fetch_df(stmt)
 
     if applied is None:
         applied = _load_cases()

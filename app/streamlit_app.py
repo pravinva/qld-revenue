@@ -94,6 +94,29 @@ def _sql_quote(val: str) -> str:
     return "'" + str(val).replace("'", "''") + "'"
 
 
+
+
+def _state_str(state) -> str | None:
+    """Normalize Databricks SDK enum/string state values to plain strings (e.g., 'SUCCEEDED')."""
+    if state is None:
+        return None
+    if isinstance(state, str):
+        return state
+    # Databricks SDK uses enums for status.state
+    if hasattr(state, 'value'):
+        try:
+            return str(state.value)
+        except Exception:
+            pass
+    if hasattr(state, 'name'):
+        try:
+            return str(state.name)
+        except Exception:
+            pass
+    s = str(state)
+    # e.g. 'StatementState.SUCCEEDED' -> 'SUCCEEDED'
+    return s.split('.')[-1]
+
 def _get_ws_client():
     from databricks.sdk import WorkspaceClient
 
@@ -106,7 +129,7 @@ def _wait_for_statement(w, statement_id: str, timeout_s: int = 120):
     deadline = time.time() + timeout_s
     while True:
         resp = w.statement_execution.get_statement(statement_id)
-        state = resp.status.state if resp.status else None
+        state = _state_str(resp.status.state) if resp.status else None
         if state in ("SUCCEEDED", "FAILED", "CANCELED"):
             return resp
         if time.time() > deadline:
@@ -126,10 +149,10 @@ def _sql_fetch_df(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> p
     if not st_id:
         return pd.DataFrame()
 
-    if not resp.status or resp.status.state in ("PENDING", "RUNNING"):
+    if (not resp.status) or (_state_str(resp.status.state) in ("PENDING", "RUNNING")):
         resp = _wait_for_statement(w, st_id)
 
-    state = resp.status.state if resp.status else None
+    state = _state_str(resp.status.state) if resp.status else None
     if state != "SUCCEEDED":
         msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
         raise RuntimeError(msg)
@@ -155,10 +178,10 @@ def _sql_exec(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> None:
     if not st_id:
         return
 
-    if not resp.status or resp.status.state in ("PENDING", "RUNNING"):
+    if (not resp.status) or (_state_str(resp.status.state) in ("PENDING", "RUNNING")):
         resp = _wait_for_statement(w, st_id)
 
-    state = resp.status.state if resp.status else None
+    state = _state_str(resp.status.state) if resp.status else None
     if state != "SUCCEEDED":
         msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
         raise RuntimeError(msg)

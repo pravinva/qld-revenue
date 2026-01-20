@@ -32,6 +32,9 @@ QRO_TEXT = "#111827"
 # Prefer using Databricks SQL warehouse for all querying
 DEFAULT_WAREHOUSE_ID = "4b9b953939869799"
 
+CASE_MGMT_EVENTS_TABLE = "qldrevenue.qro_fraud_detection.case_management_events"
+CASE_MGMT_STATE_TABLE = "qldrevenue.qro_fraud_detection.case_management_state"
+
 
 def _apply_branding() -> None:
     st.set_page_config(page_title="QRO Fraud Case Mgmt", layout="wide")
@@ -235,6 +238,58 @@ def _mark_rule_used(rule_id: str) -> None:
     _sql_exec(stmt)
 
 
+
+
+def _upsert_case_state(case_id: str, status: Optional[str] = None, assigned_to: Optional[str] = None, compliance_officer: Optional[str] = None) -> None:
+    """Upsert current operational state for a case."""
+    # Build a MERGE that only updates provided fields (keeps existing state otherwise)
+    status_sql = 'NULL' if status is None else _sql_quote(status)
+    assigned_sql = 'NULL' if assigned_to is None else _sql_quote(assigned_to)
+    officer_sql = 'NULL' if compliance_officer is None else _sql_quote(compliance_officer)
+
+    stmt = f"""
+      MERGE INTO {CASE_MGMT_STATE_TABLE} AS t
+      USING (SELECT {_sql_quote(case_id)} AS case_id,
+                    {status_sql} AS status,
+                    {assigned_sql} AS assigned_to,
+                    {officer_sql} AS compliance_officer) AS s
+      ON t.case_id = s.case_id
+      WHEN MATCHED THEN UPDATE SET
+        t.status = COALESCE(s.status, t.status),
+        t.assigned_to = COALESCE(s.assigned_to, t.assigned_to),
+        t.compliance_officer = COALESCE(s.compliance_officer, t.compliance_officer),
+        t.updated_at = current_timestamp()
+      WHEN NOT MATCHED THEN INSERT (case_id, status, assigned_to, compliance_officer, updated_at)
+      VALUES (s.case_id, s.status, s.assigned_to, s.compliance_officer, current_timestamp())
+    """
+    _sql_exec(stmt)
+
+
+def _insert_case_event(
+    case_id: str,
+    officer_email: str,
+    event_type: str,
+    new_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    note: Optional[str] = None,
+) -> None:
+    event_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat()
+    stmt = f"""
+      INSERT INTO {CASE_MGMT_EVENTS_TABLE}
+      (event_id, case_id, officer_email, event_type, new_status, assigned_to, note, created_at)
+      VALUES (
+        {_sql_quote(event_id)},
+        {_sql_quote(case_id)},
+        {_sql_quote(officer_email)},
+        {_sql_quote(event_type)},
+        {('NULL' if new_status is None else _sql_quote(new_status))},
+        {('NULL' if assigned_to is None else _sql_quote(assigned_to))},
+        {('NULL' if note is None else _sql_quote(note))},
+        {_sql_quote(now)}
+      )
+    """
+    _sql_exec(stmt)
 @st.cache_data(ttl=30)
 def _case_history(case_id: str) -> pd.DataFrame:
     stmt = f"""
@@ -440,6 +495,39 @@ def main() -> None:
         if st.button("Show Delta History"):
             hist = _case_history(selected_case_id)
             st.dataframe(hist, use_container_width=True, height=240)
+        st.markdown("#### Case Management")
+        new_status = st.selectbox(
+            "Set status",
+            options=["(no change)", "Open", "Under Review", "Investigation", "Compliance Action", "Closed"],
+            index=0,
+            key="cm_status",
+        )
+        note = st.text_area("Add note", value="", key="cm_note", height=80)
+
+        cma, cmb = st.columns(2)
+        with cma:
+            if st.button("Assign to me"):
+                _upsert_case_state(selected_case_id, assigned_to=officer_email)
+                _insert_case_event(selected_case_id, officer_email, "ASSIGN", assigned_to=officer_email)
+                st.cache_data.clear()
+                st.success("Assigned.")
+        with cmb:
+            if st.button("Unassign"):
+                _upsert_case_state(selected_case_id, assigned_to="")
+                _insert_case_event(selected_case_id, officer_email, "UNASSIGN", assigned_to="")
+                st.cache_data.clear()
+                st.success("Unassigned.")
+
+        if st.button("Save status/note"):
+            status_val = None if new_status == "(no change)" else new_status
+            if status_val is not None:
+                _upsert_case_state(selected_case_id, status=status_val)
+                _insert_case_event(selected_case_id, officer_email, "STATUS_CHANGE", new_status=status_val)
+            if note.strip():
+                _insert_case_event(selected_case_id, officer_email, "NOTE", note=note.strip())
+            st.cache_data.clear()
+            st.success("Saved.")
+
         if st.button("Create ServiceNow Incident"):
             payload = {
                 "short_description": f"QRO Revenue Case: {r.get('case_id')}",

@@ -18,6 +18,7 @@ import streamlit as st
 from qldrevenue.constants import GOLD_TABLE_ACTIVE, OFFICER_RULES_TABLE, SILVER_TABLE
 from qldrevenue.formatting import format_abn
 from qldrevenue.dbsql import dataframe_from_statement_response, state_str
+from qldrevenue.metrics import kpis
 
 
 APP_TITLE = "Queensland Revenue Office — Fraud Case Management"
@@ -247,17 +248,8 @@ def _case_history(case_id: str) -> pd.DataFrame:
 
 
 def _kpis(df: pd.DataFrame) -> Dict[str, Any]:
-    if df.empty:
-        return {"total_cases": 0, "total_exposure": 0.0, "avg_shortfall": 0.0, "unique_taxpayers": 0}
-    total_exposure = float(df["total_exposure"].fillna(0).sum()) if "total_exposure" in df.columns else 0.0
-    avg_shortfall = float(df["tax_shortfall"].fillna(0).mean()) if "tax_shortfall" in df.columns else 0.0
-    unique_taxpayers = int(df["taxpayer_abn"].nunique()) if "taxpayer_abn" in df.columns else 0
-    return {
-        "total_cases": int(len(df)),
-        "total_exposure": total_exposure,
-        "avg_shortfall": avg_shortfall,
-        "unique_taxpayers": unique_taxpayers,
-    }
+    # Backwards-compatible wrapper
+    return kpis(df)
 
 
 def main() -> None:
@@ -344,7 +336,7 @@ def main() -> None:
     if applied is None:
         applied = _load_cases()
 
-    k = _kpis(applied)
+    k = kpis(applied)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -400,7 +392,7 @@ def main() -> None:
     if "taxpayer_abn" in d.columns:
         d["taxpayer_abn"] = d["taxpayer_abn"].map(format_abn)
     if "tax_shortfall" in d.columns:
-        d["tax_shortfall"] = d["tax_shortfall"].map(lambda x: f"${float(x):,.0f}")
+        d["tax_shortfall"] = pd.to_numeric(d["tax_shortfall"], errors="coerce").fillna(0).map(lambda x: f"${float(x):,.0f}")
     st.dataframe(d, use_container_width=True, height=360)
 
     st.markdown("### Case Details")

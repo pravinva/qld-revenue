@@ -1,8 +1,8 @@
 import os
 import sys
 
-# Databricks Apps run source under /app/python/source_code/...
-# Ensure the repo root is on sys.path so `import qldrevenue` works without packaging.
+# Databricks Apps sync source under /app/python/source_code/... and does not necessarily install
+# local packages. Ensure repo root is on sys.path so `import qldrevenue` works.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -26,6 +26,9 @@ QRO_MAROON = "#6A0032"
 QRO_GOLD = "#F5C400"
 QRO_BG = "#F9FAFB"
 QRO_TEXT = "#111827"
+
+# Prefer using Databricks SQL warehouse for all querying
+DEFAULT_WAREHOUSE_ID = "4b9b953939869799"
 
 
 def _apply_branding() -> None:
@@ -82,88 +85,147 @@ def _apply_branding() -> None:
     font-weight: 800;
   }}
 </style>
-         """,
+        """,
         unsafe_allow_html=True,
     )
 
 
-def _spark_available() -> bool:
-    try:
-        import pyspark  # noqa: F401
-
-        return True
-    except Exception:
-        return False
+def _sql_quote(val: str) -> str:
+    return "'" + str(val).replace("'", "''") + "'"
 
 
-def _get_spark():
-    try:
-        return spark  # type: ignore[name-defined]
-    except Exception:
-        from pyspark.sql import SparkSession
+def _get_ws_client():
+    from databricks.sdk import WorkspaceClient
 
-        return SparkSession.builder.getOrCreate()
+    return WorkspaceClient()
+
+
+def _wait_for_statement(w, statement_id: str, timeout_s: int = 120):
+    import time
+
+    deadline = time.time() + timeout_s
+    while True:
+        resp = w.statement_execution.get_statement(statement_id)
+        state = resp.status.state if resp.status else None
+        if state in ("SUCCEEDED", "FAILED", "CANCELED"):
+            return resp
+        if time.time() > deadline:
+            raise TimeoutError(f"SQL statement timed out (state={state})")
+        time.sleep(1)
+
+
+def _sql_fetch_df(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> pd.DataFrame:
+    """Execute SELECT and return a pandas DataFrame."""
+    w = _get_ws_client()
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=warehouse_id,
+        statement=statement,
+        wait_timeout="30s",
+    )
+    st_id = resp.statement_id
+    if not st_id:
+        return pd.DataFrame()
+
+    if not resp.status or resp.status.state in ("PENDING", "RUNNING"):
+        resp = _wait_for_statement(w, st_id)
+
+    state = resp.status.state if resp.status else None
+    if state != "SUCCEEDED":
+        msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
+        raise RuntimeError(msg)
+
+    res = resp.result
+    if not res or not res.manifest or not res.manifest.schema:
+        return pd.DataFrame()
+
+    cols = [c.name for c in (res.manifest.schema.columns or [])]
+    rows = res.data_array or []
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _sql_exec(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> None:
+    """Execute INSERT/UPDATE/DDL. Raises on failure."""
+    w = _get_ws_client()
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=warehouse_id,
+        statement=statement,
+        wait_timeout="30s",
+    )
+    st_id = resp.statement_id
+    if not st_id:
+        return
+
+    if not resp.status or resp.status.state in ("PENDING", "RUNNING"):
+        resp = _wait_for_statement(w, st_id)
+
+    state = resp.status.state if resp.status else None
+    if state != "SUCCEEDED":
+        msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
+        raise RuntimeError(msg)
 
 
 @st.cache_data(ttl=10)
 def _load_cases(limit: int = 2000) -> pd.DataFrame:
-    if not _spark_available():
-        return pd.DataFrame()
-    sp = _get_spark()
-    return sp.table(GOLD_TABLE_ACTIVE).limit(int(limit)).toPandas()
+    stmt = f"""
+      SELECT *
+      FROM {GOLD_TABLE_ACTIVE}
+      LIMIT {int(limit)}
+    """
+    return _sql_fetch_df(stmt)
 
 
 @st.cache_data(ttl=10)
 def _load_rules(officer_email: str) -> pd.DataFrame:
-    if not _spark_available():
+    stmt = f"""
+      SELECT rule_id, officer_email, rule_name, filter_conditions, last_used_at
+      FROM {OFFICER_RULES_TABLE}
+      WHERE officer_email = {_sql_quote(officer_email)} AND is_active = true
+    """
+    try:
+        return _sql_fetch_df(stmt)
+    except Exception:
         return pd.DataFrame(columns=["rule_id", "officer_email", "rule_name", "filter_conditions", "last_used_at"])
-    sp = _get_spark()
-    return (
-        sp.table(OFFICER_RULES_TABLE)
-        .filter(f"officer_email = '{officer_email}'")
-        .filter("is_active = true")
-        .toPandas()
-    )
 
 
 def _save_rule(officer_email: str, rule_name: str, conds: Dict[str, Any]) -> str:
     rule_id = str(uuid.uuid4())
-    if not _spark_available():
-        return rule_id
-    sp = _get_spark()
     now = datetime.utcnow().isoformat()
-    row = [(rule_id, officer_email, rule_name, json.dumps(conds), now, True, None)]
-    schema = "rule_id string, officer_email string, rule_name string, filter_conditions string, created_at string, is_active boolean, last_used_at string"
-    df = sp.createDataFrame(row, schema=schema)
-    df.write.mode("append").saveAsTable(OFFICER_RULES_TABLE)
+    stmt = f"""
+      INSERT INTO {OFFICER_RULES_TABLE}
+      (rule_id, officer_email, rule_name, filter_conditions, created_at, is_active, last_used_at)
+      VALUES (
+        {_sql_quote(rule_id)},
+        {_sql_quote(officer_email)},
+        {_sql_quote(rule_name)},
+        {_sql_quote(json.dumps(conds))},
+        {_sql_quote(now)},
+        true,
+        NULL
+      )
+    """
+    _sql_exec(stmt)
     return rule_id
 
 
 def _mark_rule_used(rule_id: str) -> None:
-    if not _spark_available():
-        return
-    sp = _get_spark()
-    sp.sql(
-        f"""
-        UPDATE {OFFICER_RULES_TABLE}
-        SET last_used_at = current_timestamp()
-        WHERE rule_id = '{rule_id}'
-        """
-    )
+    stmt = f"""
+      UPDATE {OFFICER_RULES_TABLE}
+      SET last_used_at = current_timestamp()
+      WHERE rule_id = {_sql_quote(rule_id)}
+    """
+    _sql_exec(stmt)
 
 
 @st.cache_data(ttl=30)
 def _case_history(case_id: str) -> pd.DataFrame:
-    if not _spark_available():
-        return pd.DataFrame()
-    sp = _get_spark()
-    q = f"""
+    stmt = f"""
       SELECT _commit_version, _commit_timestamp, status, risk_score, assigned_to, compliance_action
       FROM table_changes('{SILVER_TABLE}', 0)
-      WHERE case_id = '{case_id}'
+      WHERE case_id = {_sql_quote(case_id)}
       ORDER BY _commit_version DESC
+      LIMIT 200
     """
-    return sp.sql(q).toPandas()
+    return _sql_fetch_df(stmt)
 
 
 def _kpis(df: pd.DataFrame) -> Dict[str, Any]:
@@ -188,19 +250,23 @@ def main() -> None:
 <div class="qro-header">
   <div>
     <div class="qro-title">{APP_TITLE}</div>
-    <div class="qro-subtitle">Filter rules • Active cases • Delta history • Escalations</div>
+    <div class="qro-subtitle">Databricks SQL warehouse querying • Rules • Active cases • Delta history</div>
   </div>
   <div class="qro-badge">Catalog: qldrevenue</div>
 </div>
-         """,
+        """,
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
+        st.markdown("### Databricks SQL")
+        st.code(f"Warehouse: {DEFAULT_WAREHOUSE_ID}")
+        st.markdown("---")
         st.markdown("### Officer")
         officer_email = st.text_input("Email", value="revenue.officer1@qro.qld.gov.au")
         st.markdown("---")
         st.markdown("### My Rules")
+
         rules_df = _load_rules(officer_email)
         rule_options = {"(none)": None}
         if not rules_df.empty:
@@ -227,26 +293,38 @@ def main() -> None:
             st.success(f"Saved rule: {new_rule_name} ({rid})")
             st.cache_data.clear()
 
-    cases = _load_cases()
-    applied = cases
-    applied_rule_conds: Optional[Dict[str, Any]] = None
+    # Cases (prefer warehouse)
+    applied = None
 
+    # If a rule is selected, apply filters in SQL (faster than fetching everything)
     if selected_rule_id and not rules_df.empty:
-        row = rules_df[rules_df["rule_id"] == selected_rule_id].iloc[0].to_dict()
-        applied_rule_conds = json.loads(row.get("filter_conditions") or "{}")
-        if _spark_available():
-            sp = _get_spark()
-            df = sp.table(GOLD_TABLE_ACTIVE)
-            if applied_rule_conds.get("case_types"):
-                df = df.filter(f"case_type IN ({','.join([repr(x) for x in applied_rule_conds['case_types']])})")
-            if applied_rule_conds.get("industry_codes"):
-                df = df.filter(f"industry_code IN ({','.join([repr(x) for x in applied_rule_conds['industry_codes']])})")
-            if applied_rule_conds.get("tax_shortfall_min") is not None:
-                df = df.filter(f"tax_shortfall >= {float(applied_rule_conds['tax_shortfall_min'])}")
-            if applied_rule_conds.get("risk_score_min") is not None:
-                df = df.filter(f"risk_score >= {int(applied_rule_conds['risk_score_min'])}")
-            applied = df.limit(5000).toPandas()
-        _mark_rule_used(selected_rule_id)
+        row = rules_df[rules_df["rule_id"] == selected_rule_id]
+        if not row.empty:
+            r0 = row.iloc[0].to_dict()
+            conds = json.loads(r0.get("filter_conditions") or "{}")
+            where = ["1=1"]
+            if conds.get("case_types"):
+                vals = ",".join(_sql_quote(x) for x in conds["case_types"])
+                where.append(f"case_type IN ({vals})")
+            if conds.get("industry_codes"):
+                vals = ",".join(_sql_quote(x) for x in conds["industry_codes"])
+                where.append(f"industry_code IN ({vals})")
+            if conds.get("tax_shortfall_min") is not None:
+                where.append(f"tax_shortfall >= {float(conds['tax_shortfall_min'])}")
+            if conds.get("risk_score_min") is not None:
+                where.append(f"risk_score >= {int(conds['risk_score_min'])}")
+
+            stmt = f"""
+              SELECT *
+              FROM {GOLD_TABLE_ACTIVE}
+              WHERE {' AND '.join(where)}
+              LIMIT 5000
+            """
+            applied = _sql_fetch_df(stmt)
+            _mark_rule_used(selected_rule_id)
+
+    if applied is None:
+        applied = _load_cases()
 
     k = _kpis(applied)
 
@@ -278,7 +356,10 @@ def main() -> None:
 
     st.markdown("### Active Cases")
     if applied.empty:
-        st.info("No cases loaded. If running locally, this is expected. In Databricks, ensure SQL scripts have been run.")
+        st.error(
+            "No cases loaded. Databricks SQL query returned 0 rows. "
+            "Verify qldrevenue.qro_fraud_detection.revenue_cases_gold_active has data and this app has SELECT permissions."
+        )
         return
 
     display_cols = [
@@ -306,30 +387,30 @@ def main() -> None:
 
     st.markdown("### Case Details")
     selected_case_id = st.text_input("Enter Case ID", value=str(d.iloc[0]["case_id"]))
-    if selected_case_id and "case_id" in applied.columns:
-        case_row = applied[applied["case_id"] == selected_case_id]
-        if case_row.empty:
-            st.warning("Case not found in current filtered view.")
-        else:
-            r = case_row.iloc[0].to_dict()
-            left, right = st.columns([2, 1])
-            with left:
-                st.json(r, expanded=False)
-            with right:
-                st.markdown("#### Actions")
-                if st.button("Show Delta History"):
-                    hist = _case_history(selected_case_id)
-                    st.dataframe(hist, use_container_width=True, height=240)
-                if st.button("Create ServiceNow Incident"):
-                    payload = {
-                        "short_description": f"QRO Revenue Case: {r.get('case_id')}",
-                        "description": f"ABN: {r.get('taxpayer_abn')}\nShortfall: {r.get('tax_shortfall')}",
-                        "urgency": 1 if r.get("severity") == "Critical" else 3,
-                        "assignment_group": "Revenue Compliance Team",
-                        "u_qro_case_id": r.get("case_id"),
-                    }
-                    st.success("Prepared ServiceNow payload (demo).")
-                    st.json(payload)
+    case_row = applied[applied["case_id"] == selected_case_id]
+    if case_row.empty:
+        st.warning("Case not found in current filtered view.")
+        return
+
+    r = case_row.iloc[0].to_dict()
+    left, right = st.columns([2, 1])
+    with left:
+        st.json(r, expanded=False)
+    with right:
+        st.markdown("#### Actions")
+        if st.button("Show Delta History"):
+            hist = _case_history(selected_case_id)
+            st.dataframe(hist, use_container_width=True, height=240)
+        if st.button("Create ServiceNow Incident"):
+            payload = {
+                "short_description": f"QRO Revenue Case: {r.get('case_id')}",
+                "description": f"ABN: {r.get('taxpayer_abn')}\nShortfall: {r.get('tax_shortfall')}",
+                "urgency": 1 if r.get("severity") == "Critical" else 3,
+                "assignment_group": "Revenue Compliance Team",
+                "u_qro_case_id": r.get("case_id"),
+            }
+            st.success("Prepared ServiceNow payload (demo).")
+            st.json(payload)
 
 
 if __name__ == "__main__":

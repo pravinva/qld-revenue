@@ -1,16 +1,11 @@
 USE CATALOG qldrevenue;
 USE SCHEMA qro_fraud_detection;
 
--- Migration for existing environments that already created revenue_cases_silver.
--- Adds broader case model columns and backfills values based on existing fields.
+-- Migration / backfill for broader case model.
+-- NOTE: If your table already has case_domain/case_reason/is_fraud_suspected, do NOT try to add columns again.
+-- This script is safe to re-run and will recompute classification.
 
-ALTER TABLE revenue_cases_silver ADD COLUMNS (
-  case_domain STRING,
-  case_reason STRING,
-  is_fraud_suspected BOOLEAN
-);
-
--- Backfill classification
+-- Recompute classification (ratio-based; avoids using current_date() vs 2023 due dates)
 UPDATE revenue_cases_silver
 SET
   case_domain = CASE
@@ -21,8 +16,8 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN 'Fraud'
-    WHEN tax_shortfall > 0 AND (tax_amount_paid / tax_amount_assessed) < 0.75 THEN 'Debt'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN 'Compliance'
+    WHEN tax_shortfall > 0 AND (tax_amount_paid / NULLIF(tax_amount_assessed, 0)) < 0.75 THEN 'Debt'
     ELSE 'Service'
   END,
   is_fraud_suspected = CASE
@@ -43,14 +38,13 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN concat('Fraud signal: ', fraud_category)
-    WHEN tax_shortfall > 0 AND (tax_amount_paid / tax_amount_assessed) < 0.75 THEN 'Arrears / debt follow-up'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN concat('Compliance review: ', fraud_category)
+    WHEN tax_shortfall > 0 AND (tax_amount_paid / NULLIF(tax_amount_assessed, 0)) < 0.75 THEN 'Arrears / debt follow-up'
     ELSE 'Processing / customer service'
   END
-WHERE case_domain IS NULL;
+WHERE is_test_data = false;
 
 -- Ensure operational tables exist (if using case management write-back)
--- (safe no-ops if already created)
 CREATE TABLE IF NOT EXISTS case_management_events (
   event_id STRING NOT NULL,
   case_id STRING NOT NULL,

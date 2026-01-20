@@ -16,6 +16,9 @@ SELECT
   'Payroll Tax' as case_type,
   CASE
     WHEN lodgement_id IN ('PT-MINING-001','PT-HOSP-001','PT-CONST-001') THEN 'Fraud'
+    -- Seed a small, deterministic % into Registration / Objection for demo breadth
+    WHEN pmod(abs(hash(lodgement_id)), 50) = 1 THEN 'Registration'
+    WHEN pmod(abs(hash(lodgement_id)), 50) = 2 THEN 'Objection'
     WHEN (tax_assessed - tax_paid) > 0 AND (tax_paid / tax_assessed) < 0.80 AND datediff(lodgement_date, lodgement_due_date) > 20 THEN 'Debt'
     WHEN datediff(lodgement_date, lodgement_due_date) > 30 THEN 'Compliance'
     ELSE 'Service'
@@ -101,6 +104,8 @@ SELECT
   'Land Tax' as case_type,
   CASE
     WHEN assessment_id = 'LT-LUXURY-001' THEN 'Fraud'
+    WHEN pmod(abs(hash(assessment_id)), 60) = 1 THEN 'Registration'
+    WHEN pmod(abs(hash(assessment_id)), 60) = 2 THEN 'Objection'
     WHEN (tax_assessed - tax_paid) > 0 AND (tax_paid / tax_assessed) < 0.65 THEN 'Debt'
     WHEN exemption_claimed THEN 'Compliance'
     ELSE 'Service'
@@ -164,6 +169,8 @@ SELECT
   'Transfer Duty' as case_type,
   CASE
     WHEN transaction_id = 'TD-RELATED-001' THEN 'Fraud'
+    WHEN pmod(abs(hash(transaction_id)), 60) = 1 THEN 'Registration'
+    WHEN pmod(abs(hash(transaction_id)), 60) = 2 THEN 'Objection'
     WHEN (duty_assessed - duty_paid) > 0 AND (duty_paid / duty_assessed) < 0.74 THEN 'Debt'
     WHEN related_party_transaction OR foreign_buyer THEN 'Compliance'
     ELSE 'Service'

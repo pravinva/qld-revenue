@@ -8,7 +8,7 @@ USE SCHEMA qro_fraud_detection;
 -- Recompute classification (ratio-based; avoids using current_date() vs 2023 due dates)
 UPDATE revenue_cases_silver
 SET
-  case_domain = CASE
+    case_domain = CASE
     WHEN fraud_category IN (
       'Interstate Wage Shifting',
       'Cash Business Underreporting',
@@ -16,6 +16,8 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN 'Fraud'
+    WHEN pmod(abs(hash(coalesce(source_record_id, case_id))), 50) = 1 THEN 'Registration'
+    WHEN pmod(abs(hash(coalesce(source_record_id, case_id))), 50) = 2 THEN 'Objection'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN 'Compliance'
     WHEN tax_shortfall > 0 AND (tax_amount_paid / NULLIF(tax_amount_assessed, 0)) < 0.75 THEN 'Debt'
     ELSE 'Service'
@@ -38,6 +40,8 @@ SET
       'Luxury Property False Farming Claim',
       'Related Party Undervaluation'
     ) THEN concat('Fraud signal: ', fraud_category)
+    WHEN pmod(abs(hash(coalesce(source_record_id, case_id))), 50) = 1 THEN 'Registration / account maintenance'
+    WHEN pmod(abs(hash(coalesce(source_record_id, case_id))), 50) = 2 THEN 'Objection / dispute handling'
     WHEN fraud_category IN ('Exemption Review','Related Party Review','Foreign Buyer Surcharge Review') THEN concat('Compliance review: ', fraud_category)
     WHEN tax_shortfall > 0 AND (tax_amount_paid / NULLIF(tax_amount_assessed, 0)) < 0.75 THEN 'Arrears / debt follow-up'
     ELSE 'Processing / customer service'

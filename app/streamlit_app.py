@@ -238,13 +238,23 @@ def _mark_rule_used(rule_id: str) -> None:
 @st.cache_data(ttl=30)
 def _case_history(case_id: str) -> pd.DataFrame:
     stmt = f"""
-      SELECT _commit_version, _commit_timestamp, status, risk_score, assigned_to, compliance_action
+      SELECT _commit_version, _commit_timestamp, status, risk_score, assigned_to, compliance_officer
       FROM table_changes('{SILVER_TABLE}', 0)
       WHERE case_id = {_sql_quote(case_id)}
       ORDER BY _commit_version DESC
       LIMIT 200
     """
-    return _sql_fetch_df(stmt)
+    try:
+        return _sql_fetch_df(stmt)
+    except Exception:
+        stmt2 = f"""
+      SELECT _commit_version, _commit_timestamp, status, risk_score, assigned_to
+      FROM table_changes('{SILVER_TABLE}', 0)
+      WHERE case_id = {_sql_quote(case_id)}
+      ORDER BY _commit_version DESC
+      LIMIT 200
+    """
+        return _sql_fetch_df(stmt2)
 
 
 def _kpis(df: pd.DataFrame) -> Dict[str, Any]:

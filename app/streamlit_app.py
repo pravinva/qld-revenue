@@ -21,7 +21,7 @@ from qldrevenue.dbsql import dataframe_from_statement_response, state_str
 from qldrevenue.metrics import kpis
 
 
-APP_TITLE = "Queensland Revenue Office — Fraud Case Management"
+APP_TITLE = "Queensland Revenue Office — Revenue Case Management"
 
 # QRO branding
 QRO_MAROON = "#6A0032"
@@ -325,7 +325,7 @@ def main() -> None:
 <div class="qro-header">
   <div>
     <div class="qro-title">{APP_TITLE}</div>
-    <div class="qro-subtitle">Databricks SQL warehouse querying • Rules • Active cases • Delta history</div>
+    <div class="qro-subtitle">Databricks SQL warehouse • Rules • Case management (assign/status/notes) • Delta history</div>
   </div>
   <div class="qro-badge">Catalog: qldrevenue</div>
 </div>

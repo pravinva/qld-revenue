@@ -1,6 +1,6 @@
-# Queensland Revenue Office (QRO) — Fraud Case Management (Databricks App)
+# Queensland Revenue Office (QRO) — Revenue Case Management (Databricks App)
 
-This repo contains a **Databricks App** for Queensland Revenue officers to **filter, investigate, and manage** revenue/tax fraud cases.
+This repo contains a **Databricks App** for Queensland Revenue officers to **filter, investigate, and manage** revenue/tax cases.
 
 It includes:
 - A **Streamlit Databricks App** (QRO branding)

@@ -1,10 +1,40 @@
+# macOS
 .DS_Store
+
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+*.pyd
+*.so
+
+# Virtualenvs
 .venv/
 venv/
 .env
-dist/
+.env.*
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# Typecheck/lint caches
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Packaging/build
 build/
+dist/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
+
+# Node (if ever added)
 node_modules/
+
+# Databricks / misc
+*.log

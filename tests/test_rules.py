@@ -12,6 +12,7 @@ def test_mining_sector_high_risk_rule_filters_correctly() -> None:
                 "industry_code": "0600",
                 "tax_shortfall": 285000.0,
                 "risk_score": 88,
+                "case_domain": "Fraud",
             },
             {
                 "case_id": "CASE-PT-00123",
@@ -19,6 +20,7 @@ def test_mining_sector_high_risk_rule_filters_correctly() -> None:
                 "industry_code": "0600",
                 "tax_shortfall": 48000.0,
                 "risk_score": 72,
+                "case_domain": "Service",
             },
             {
                 "case_id": "CASE-PT-00456",
@@ -26,12 +28,14 @@ def test_mining_sector_high_risk_rule_filters_correctly() -> None:
                 "industry_code": "4500",
                 "tax_shortfall": 65000.0,
                 "risk_score": 75,
+                "case_domain": "Compliance",
             },
         ]
     )
 
     conds = to_rule_conditions(
         case_types=["Payroll Tax"],
+        case_domains=["Fraud"],
         industry_codes=["0600"],
         tax_shortfall_min=50000,
         risk_score_min=60,

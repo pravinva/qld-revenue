@@ -15,6 +15,21 @@ SELECT
   END as case_id,
   'Payroll Tax' as case_type,
   CASE
+    WHEN lodgement_id IN ('PT-MINING-001','PT-HOSP-001','PT-CONST-001') THEN 'Fraud'
+    WHEN greatest(datediff(current_date(), lodgement_due_date), 0) > 30 AND (tax_assessed - tax_paid) > 0 THEN 'Debt'
+    WHEN datediff(lodgement_date, lodgement_due_date) > 30 THEN 'Compliance'
+    ELSE 'Service'
+  END as case_domain,
+  CASE
+    WHEN lodgement_id = 'PT-MINING-001' THEN 'Mining wage shifting anomaly'
+    WHEN lodgement_id = 'PT-HOSP-001' THEN 'Hospitality cash underreporting signal'
+    WHEN lodgement_id = 'PT-CONST-001' THEN 'Contractor misclassification pattern'
+    WHEN greatest(datediff(current_date(), lodgement_due_date), 0) > 30 AND (tax_assessed - tax_paid) > 0 THEN 'Arrears / debt follow-up'
+    WHEN datediff(lodgement_date, lodgement_due_date) > 30 THEN 'Late lodgement follow-up'
+    ELSE 'General enquiry / processing'
+  END as case_reason,
+  CASE WHEN lodgement_id IN ('PT-MINING-001','PT-HOSP-001','PT-CONST-001') THEN true ELSE false END as is_fraud_suspected,
+  CASE
     WHEN lodgement_id = 'PT-MINING-001' THEN 'Interstate Wage Shifting'
     WHEN lodgement_id = 'PT-HOSP-001' THEN 'Cash Business Underreporting'
     WHEN lodgement_id = 'PT-CONST-001' THEN 'Excessive Exemption Claims'
@@ -84,6 +99,19 @@ SELECT
   CASE WHEN assessment_id = 'LT-LUXURY-001' THEN 'CASE-LT-FRAUD-LUXURY-001'
        ELSE concat('CASE-LT-', lpad(substr(assessment_id, 4), 5, '0')) END as case_id,
   'Land Tax' as case_type,
+  CASE
+    WHEN assessment_id = 'LT-LUXURY-001' THEN 'Fraud'
+    WHEN (tax_assessed - tax_paid) > 0 AND greatest(datediff(current_date(), payment_due_date), 0) > 30 THEN 'Debt'
+    WHEN exemption_claimed THEN 'Compliance'
+    ELSE 'Service'
+  END as case_domain,
+  CASE
+    WHEN assessment_id = 'LT-LUXURY-001' THEN 'High-value exemption integrity check'
+    WHEN (tax_assessed - tax_paid) > 0 AND greatest(datediff(current_date(), payment_due_date), 0) > 30 THEN 'Arrears / debt follow-up'
+    WHEN exemption_claimed THEN 'Exemption eligibility review'
+    ELSE 'Assessment / customer service'
+  END as case_reason,
+  CASE WHEN assessment_id = 'LT-LUXURY-001' THEN true ELSE false END as is_fraud_suspected,
   CASE WHEN assessment_id = 'LT-LUXURY-001' THEN 'Luxury Property False Farming Claim'
        WHEN exemption_claimed THEN 'Exemption Review'
        ELSE 'Standard Review' END as fraud_category,
@@ -134,6 +162,20 @@ SELECT
   CASE WHEN transaction_id = 'TD-RELATED-001' THEN 'CASE-TD-FRAUD-RELATED-001'
        ELSE concat('CASE-TD-', lpad(substr(transaction_id, 4), 5, '0')) END as case_id,
   'Transfer Duty' as case_type,
+  CASE
+    WHEN transaction_id = 'TD-RELATED-001' THEN 'Fraud'
+    WHEN (duty_assessed - duty_paid) > 0 AND greatest(datediff(current_date(), lodgement_date), 0) > 30 THEN 'Debt'
+    WHEN related_party_transaction OR foreign_buyer THEN 'Compliance'
+    ELSE 'Service'
+  END as case_domain,
+  CASE
+    WHEN transaction_id = 'TD-RELATED-001' THEN 'Related party value integrity check'
+    WHEN (duty_assessed - duty_paid) > 0 AND greatest(datediff(current_date(), lodgement_date), 0) > 30 THEN 'Arrears / debt follow-up'
+    WHEN related_party_transaction THEN 'Related party transaction review'
+    WHEN foreign_buyer THEN 'Foreign buyer surcharge review'
+    ELSE 'Processing / customer service'
+  END as case_reason,
+  CASE WHEN transaction_id = 'TD-RELATED-001' THEN true ELSE false END as is_fraud_suspected,
   CASE WHEN transaction_id = 'TD-RELATED-001' THEN 'Related Party Undervaluation'
        WHEN related_party_transaction THEN 'Related Party Review'
        WHEN foreign_buyer THEN 'Foreign Buyer Surcharge Review'

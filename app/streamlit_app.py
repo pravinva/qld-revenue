@@ -366,12 +366,14 @@ def main() -> None:
         st.markdown("### Create New Rule")
         new_rule_name = st.text_input("Rule name", value="Mining Sector High Risk")
         case_types = st.multiselect("Case type", ["Payroll Tax", "Land Tax", "Transfer Duty"], default=["Payroll Tax"])
+        case_domains = st.multiselect("Case domain", ["Fraud", "Compliance", "Debt", "Objection", "Service", "Registration"], default=["Fraud"])
         industry_codes = st.multiselect("Industry code", ["0600", "3000", "4400", "4500", "6000"], default=["0600"])
         tax_shortfall_min = st.number_input("Min tax shortfall", min_value=0, value=50000, step=1000)
         risk_score_min = st.number_input("Min risk score", min_value=0, max_value=100, value=60, step=1)
         if st.button("Save rule", type="primary"):
             conds = {
                 "case_types": case_types,
+                "case_domains": case_domains,
                 "industry_codes": industry_codes,
                 "tax_shortfall_min": float(tax_shortfall_min),
                 "risk_score_min": int(risk_score_min),
@@ -391,7 +393,11 @@ def main() -> None:
             r0 = row.iloc[0].to_dict()
             conds = json.loads(r0.get("filter_conditions") or "{}")
             where = ["1=1"]
-            if conds.get("case_types"):
+            if conds.get("case_domains"):
+                vals = ",".join(_sql_quote(x) for x in conds["case_domains"])
+                where.append(f"case_domain IN ({vals})")
+            # existing filters
+            
                 vals = ",".join(_sql_quote(x) for x in conds["case_types"])
                 where.append(f"case_type IN ({vals})")
             if conds.get("industry_codes"):
@@ -461,6 +467,7 @@ def main() -> None:
         for c in [
             "case_id",
             "case_type",
+            "case_domain",
             "taxpayer_name",
             "taxpayer_abn",
             "tax_shortfall",

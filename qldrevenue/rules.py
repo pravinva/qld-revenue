@@ -53,6 +53,9 @@ def apply_rule_df(cases: pd.DataFrame, conds: Dict[str, Any]) -> pd.DataFrame:
     if conds.get("case_types") and _maybe("case_type"):
         df = df[df["case_type"].isin(list(conds["case_types"]))]
 
+    if conds.get("case_domains") and _maybe("case_domain"):
+        df = df[df["case_domain"].isin(list(conds["case_domains"]))]
+
     if conds.get("industry_codes") and _maybe("industry_code"):
         df = df[df["industry_code"].isin(list(conds["industry_codes"]))]
 
@@ -76,6 +79,7 @@ def apply_rule_df(cases: pd.DataFrame, conds: Dict[str, Any]) -> pd.DataFrame:
 
 def to_rule_conditions(
     case_types: Optional[Iterable[str]] = None,
+    case_domains: Optional[Iterable[str]] = None,
     industry_codes: Optional[Iterable[str]] = None,
     tax_shortfall_min: Optional[float] = None,
     risk_score_min: Optional[int] = None,
@@ -86,6 +90,8 @@ def to_rule_conditions(
     conds: Dict[str, Any] = {}
     if case_types:
         conds["case_types"] = list(case_types)
+    if case_domains:
+        conds["case_domains"] = list(case_domains)
     if industry_codes:
         conds["industry_codes"] = list(industry_codes)
     if tax_shortfall_min is not None:

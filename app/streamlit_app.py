@@ -17,6 +17,7 @@ import streamlit as st
 
 from qldrevenue.constants import GOLD_TABLE_ACTIVE, OFFICER_RULES_TABLE, SILVER_TABLE
 from qldrevenue.formatting import format_abn
+from qldrevenue.dbsql import dataframe_from_statement_response, state_str
 
 
 APP_TITLE = "Queensland Revenue Office — Fraud Case Management"
@@ -123,13 +124,13 @@ def _get_ws_client():
     return WorkspaceClient()
 
 
-def _wait_for_statement(w, statement_id: str, timeout_s: int = 120):
+def _wait_for_statement(w, statement_id: str, timeout_s: int = 180):
     import time
 
     deadline = time.time() + timeout_s
     while True:
         resp = w.statement_execution.get_statement(statement_id)
-        state = _state_str(resp.status.state) if resp.status else None
+        state = state_str(resp.status.state) if resp.status else None
         if state in ("SUCCEEDED", "FAILED", "CANCELED"):
             return resp
         if time.time() > deadline:
@@ -143,27 +144,21 @@ def _sql_fetch_df(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> p
     resp = w.statement_execution.execute_statement(
         warehouse_id=warehouse_id,
         statement=statement,
-        wait_timeout="30s",
+        wait_timeout="50s",
     )
     st_id = resp.statement_id
     if not st_id:
         return pd.DataFrame()
 
-    if (not resp.status) or (_state_str(resp.status.state) in ("PENDING", "RUNNING")):
+    if (not resp.status) or (state_str(resp.status.state) in ("PENDING", "RUNNING")):
         resp = _wait_for_statement(w, st_id)
 
-    state = _state_str(resp.status.state) if resp.status else None
+    state = state_str(resp.status.state) if resp.status else None
     if state != "SUCCEEDED":
         msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
         raise RuntimeError(msg)
 
-    res = resp.result
-    if not res or not res.manifest or not res.manifest.schema:
-        return pd.DataFrame()
-
-    cols = [c.name for c in (res.manifest.schema.columns or [])]
-    rows = res.data_array or []
-    return pd.DataFrame(rows, columns=cols)
+    return dataframe_from_statement_response(resp)
 
 
 def _sql_exec(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> None:
@@ -172,16 +167,16 @@ def _sql_exec(statement: str, warehouse_id: str = DEFAULT_WAREHOUSE_ID) -> None:
     resp = w.statement_execution.execute_statement(
         warehouse_id=warehouse_id,
         statement=statement,
-        wait_timeout="30s",
+        wait_timeout="50s",
     )
     st_id = resp.statement_id
     if not st_id:
         return
 
-    if (not resp.status) or (_state_str(resp.status.state) in ("PENDING", "RUNNING")):
+    if (not resp.status) or (state_str(resp.status.state) in ("PENDING", "RUNNING")):
         resp = _wait_for_statement(w, st_id)
 
-    state = _state_str(resp.status.state) if resp.status else None
+    state = state_str(resp.status.state) if resp.status else None
     if state != "SUCCEEDED":
         msg = resp.status.error.message if (resp.status and resp.status.error) else f"Statement failed: {state}"
         raise RuntimeError(msg)

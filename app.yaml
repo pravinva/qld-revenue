@@ -1,1 +1,1 @@
-command: ["streamlit", "run", "app/streamlit_app.py", "--server.port", "8000"]
+command: ["bash", "-lc", "python -m pip install --no-cache-dir -r requirements-app.txt && streamlit run app/streamlit_app.py --server.port 8000"]

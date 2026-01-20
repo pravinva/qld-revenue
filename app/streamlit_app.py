@@ -288,12 +288,24 @@ def main() -> None:
         st.markdown("### My Rules")
 
         rules_df = _load_rules(officer_email)
-        rule_options = {"(none)": None}
         if not rules_df.empty:
-            for _, r in rules_df.sort_values("rule_name").iterrows():
-                rule_options[f"{r['rule_name']}"] = r["rule_id"]
-        selected_rule_name = st.selectbox("Select rule", options=list(rule_options.keys()), index=0)
-        selected_rule_id = rule_options[selected_rule_name]
+            st.dataframe(rules_df[["rule_name", "last_used_at"]], use_container_width=True, height=160)
+
+        rule_id_to_name = {}
+        if not rules_df.empty:
+            for _, r in rules_df.iterrows():
+                rid = r.get("rule_id")
+                nm = r.get("rule_name")
+                if isinstance(rid, str) and rid:
+                    rule_id_to_name[rid] = str(nm) if nm is not None else rid
+
+        sorted_rule_ids = sorted(rule_id_to_name.keys(), key=lambda rid: rule_id_to_name[rid].lower())
+        selected_rule_id = st.selectbox(
+            "Select rule",
+            options=[None] + sorted_rule_ids,
+            format_func=lambda rid: "(none)" if rid is None else rule_id_to_name.get(rid, rid),
+            key="selected_rule_id",
+        )
 
         st.markdown("---")
         st.markdown("### Create New Rule")
@@ -311,6 +323,7 @@ def main() -> None:
             }
             rid = _save_rule(officer_email, new_rule_name, conds)
             st.success(f"Saved rule: {new_rule_name} ({rid})")
+            st.session_state["selected_rule_id"] = rid
             st.cache_data.clear()
 
     # Cases (prefer warehouse)
@@ -327,8 +340,14 @@ def main() -> None:
                 vals = ",".join(_sql_quote(x) for x in conds["case_types"])
                 where.append(f"case_type IN ({vals})")
             if conds.get("industry_codes"):
-                vals = ",".join(_sql_quote(x) for x in conds["industry_codes"])
-                where.append(f"industry_code IN ({vals})")
+                # In this demo dataset, industry_code is populated for Payroll Tax cases.
+                # If the rule excludes Payroll Tax, applying industry filter would yield 0 rows.
+                ct = set(conds.get("case_types") or [])
+                if not ct or ("Payroll Tax" in ct):
+                    vals = ",".join(_sql_quote(x) for x in conds["industry_codes"])
+                    where.append(f"industry_code IN ({vals})")
+                else:
+                    st.warning("Industry code filter applies to Payroll Tax cases in this demo; skipping industry filter for this rule.")
             if conds.get("tax_shortfall_min") is not None:
                 where.append(f"tax_shortfall >= {float(conds['tax_shortfall_min'])}")
             if conds.get("risk_score_min") is not None:

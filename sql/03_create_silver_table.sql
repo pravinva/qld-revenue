@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS revenue_cases_silver (
 ) USING DELTA
 TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
 
-ALTER TABLE revenue_cases_silver
-ADD CONSTRAINT IF NOT EXISTS cases_pk PRIMARY KEY (case_id);
+-- NOTE: Primary keys / constraints are not enabled in many Databricks SQL/UC environments.
+-- The demo does not require the PK constraint; case_id uniqueness is ensured by generation logic.
 
 CREATE TABLE IF NOT EXISTS officer_case_rules (
   rule_id STRING NOT NULL,
